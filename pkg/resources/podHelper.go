@@ -14,7 +14,7 @@ import (
 
 // ExecCmd exec command on specific pod and wait the command's output.
 //func ExecuteRemoteCommand(ns string, podName string, command string, container string) (string, string, error) {
-func ExecuteRemoteCommand(ns string, podName string, command string, log l.Logger) (string, string, error) {
+func ExecuteRemoteCommand(ns string, podName string, command string, log l.Logger, container string) (string, string, error) {
 	cmd := []string{
 		"/bin/bash",
 		"-c",
@@ -29,12 +29,12 @@ func ExecuteRemoteCommand(ns string, podName string, command string, log l.Logge
 	req := kubeClient.CoreV1().RESTClient().Post().Resource("pods").Name(podName).
 		Namespace(ns).SubResource("exec")
 	option := &v1.PodExecOptions{
-		Command: cmd,
-		Stdin:   false,
-		Stdout:  true,
-		Stderr:  true,
-		TTY:     true,
-		//Container: container,
+		Command:   cmd,
+		Stdin:     false,
+		Stdout:    true,
+		Stderr:    true,
+		TTY:       true,
+		Container: container,
 	}
 	req.VersionedParams(
 		option,

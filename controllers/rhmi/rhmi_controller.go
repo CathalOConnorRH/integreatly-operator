@@ -78,6 +78,7 @@ const (
 	installTypeEnvName               = "INSTALLATION_TYPE"
 	priorityClassNameEnvName         = "PRIORITY_CLASS_NAME"
 	managedServicePriorityClassName  = "rhoam-pod-priority"
+	alertManagerRouteName            = "alertmanager-route"
 )
 
 var (
@@ -191,11 +192,12 @@ func New(mgr ctrl.Manager) *RHMIReconciler {
 
 // Role permissions
 
-// +kubebuilder:rbac:groups="",resources=pods;events;configmaps;secrets,verbs=list;get;watch;create;update;patch,namespace=integreatly-operator
+// +kubebuilder:rbac:groups="",resources=pods;pods/exec;events;configmaps;secrets,verbs=list;get;watch;create;update;patch,namespace=integreatly-operator
+// +kubebuilder:rbac:groups="",resources=pods;pods/exec;events;configmaps;secrets,verbs=list;get;watch;create;update;patch
 
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=delete,namespace=integreatly-operator
+// +kubebuilder:rbac:groups="",resources=pods;pods/exec;configmaps,verbs=get;list;delete;create,namespace=integreatly-operator
 
-// +kubebuilder:rbac:groups="",resources=services;services/finalizers,verbs=get;create;list;watch;update;delete,namespace=integreatly-operator
+// +kubebuilder:rbac:groups="",resources=pods;pods/exec;services;services/finalizers,verbs=get;create;list;watch;update;delete,namespace=integreatly-operator
 
 // +kubebuilder:rbac:groups=monitoring.coreos.com,resources=servicemonitors,verbs=get;create,namespace=integreatly-operator
 
@@ -205,7 +207,7 @@ func New(mgr ctrl.Manager) *RHMIReconciler {
 
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;create;update;delete;watch,namespace=integreatly-operator
 
-// +kubebuilder:rbac:groups="",resources=pods;services;endpoints,verbs=get;list;watch,namespace=integreatly-operator
+// +kubebuilder:rbac:groups="",resources=pods;pods/exec;services;endpoints,verbs=get;list;watch;create,namespace=integreatly-operator
 
 // +kubebuilder:rbac:groups=marin3r.3scale.net,resources=envoyconfigs,verbs=get;list;watch;create;update;delete,namespace=integreatly-operator
 
@@ -434,6 +436,81 @@ func (r *RHMIReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error) {
 	return retryRequeue, err
 }
 
+func (r *RHMIReconciler) createSilence(installation *rhmiv1alpha1.RHMI) error {
+
+	host := "localhost:9093"
+	endpoint := "/api/v1/silences"
+
+	alertName := "KeycloakInstanceNotAvailable"
+
+	openshiftMonitoringNamespace := "openshift-monitoring"
+	openshiftPodName := "alertmanager-main-0"
+	containerName := "alertmanager"
+
+	integreatlyMonitoringNamespace := installation.Spec.NamespacePrefix + "middleware-monitoring-operator"
+	integreatlyPodName := "alertmanager-application-monitoring-0"
+
+	exists, err := silenceExists(openshiftMonitoringNamespace, openshiftPodName, host, endpoint, log, containerName, alertName)
+	if err != nil {
+		log.Error("Error checking for silence", err)
+	}
+	if !exists {
+		silenceAlert(openshiftMonitoringNamespace, openshiftPodName, host, endpoint, log, containerName, alertName)
+	}
+
+	exists, err = silenceExists(integreatlyMonitoringNamespace, integreatlyPodName, host, endpoint, log, containerName, alertName)
+	if err != nil {
+		log.Error("Error checking for silence", err)
+	}
+	if !exists {
+		silenceAlert(integreatlyMonitoringNamespace, integreatlyPodName, host, endpoint, log, containerName, alertName)
+	}
+
+	return nil
+}
+
+func silenceAlert(namespace string, podName string, host string, endpoint string, log l.Logger, containerName string, alertName string) {
+	command := "curl -H 'Content-Type: application/json' -X POST -d "
+	startsAt := time.Now().Format(time.RFC3339)
+	endsAt := time.Now().Add(time.Hour * 1).Format(time.RFC3339)
+	silence := "'{\"endsAt\": \"" + endsAt + "\"," +
+		"\"startsAt\": \"" + startsAt + "\"," +
+		"\"matchers\": " +
+		"[{\"isRegex\": false,\"name\": \"alertname\",\"value\": \"" + alertName + "\"}]" +
+		",\"Comment\": \"Silence alert due to uninstall\"," +
+		"\"createdBy\": \"Integreatly Operator\"}' "
+
+	stdout, stderr, err := resources.ExecuteRemoteCommand(namespace, podName, command+silence+host+endpoint, log, containerName)
+	if err != nil {
+		log.Error("Failed to curl alerts", err)
+	} else if stderr != "" {
+		err := errors.New(stderr)
+		log.Error("Error attempting curl alerts", err)
+	} else {
+		log.Infof("Alerts result", l.Fields{"stdout": stdout})
+	}
+}
+
+func silenceExists(namespace string, podName string, host string, endpoint string, log l.Logger, containerName string, alertName string) (bool, error) {
+	silenceExists := false
+	command := "curl -s "
+
+	stdout, stderr, err := resources.ExecuteRemoteCommand(namespace, podName, command+host+endpoint, log, containerName)
+	if err != nil {
+		log.Error("Failed to curl alerts", err)
+		return silenceExists, err
+	} else if stderr != "" {
+		err := errors.New(stderr)
+		log.Error("Error attempting curl alerts", err)
+		return silenceExists, err
+	}
+
+	if strings.Contains(stdout, alertName) {
+		silenceExists = true
+	}
+	return silenceExists, nil
+}
+
 func (r *RHMIReconciler) reconcilePodDistribution(installation *rhmiv1alpha1.RHMI) {
 
 	serverClient, err := k8sclient.New(r.restConfig, k8sclient.Options{})
@@ -507,6 +584,13 @@ func (r *RHMIReconciler) handleUninstall(installation *rhmiv1alpha1.RHMI, instal
 		if err := r.Client.Delete(context.TODO(), &alert); err != nil {
 			return ctrl.Result{}, err
 		}
+	}
+
+	log.Info("Creating Silence for Keycloak KeycloakInstanceNotAvailable alert")
+	err = r.createSilence(installation)
+
+	if err != nil {
+		log.Error("Error creating silence", err)
 	}
 
 	// Set metrics status to unavailable

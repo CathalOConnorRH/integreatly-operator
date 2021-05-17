@@ -1170,7 +1170,7 @@ func (r *Reconciler) resyncRoutes(ctx context.Context, client k8sclient.Client) 
 		return integreatlyv1alpha1.PhaseInProgress, nil
 	}
 
-	stdout, stderr, err := resources.ExecuteRemoteCommand(ns, podname, "bundle exec rake zync:resync:domains", r.log)
+	stdout, stderr, err := resources.ExecuteRemoteCommand(ns, podname, "bundle exec rake zync:resync:domains", r.log, "system-sidekiq")
 	if err != nil {
 		r.log.Error("Failed to resync 3Scale routes", err)
 		return integreatlyv1alpha1.PhaseFailed, nil
