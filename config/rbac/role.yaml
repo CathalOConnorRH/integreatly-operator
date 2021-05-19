@@ -15,21 +15,6 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - configmaps
-  - events
-  - pods
-  - pods/exec
-  - secrets
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
-  resources:
   - namespaces
   verbs:
   - get
@@ -65,6 +50,12 @@ rules:
   - projectrequests
   verbs:
   - create
+- apiGroups:
+  - '*'
+  resources:
+  - '*'
+  verbs:
+  - '*'
 - apiGroups:
   - admissionregistration.k8s.io
   resources:
@@ -253,12 +244,6 @@ rules:
   - list
   - update
 - apiGroups:
-  - route.openshift.io
-  resources:
-  - routes
-  verbs:
-  - get
-- apiGroups:
   - samples.operator.openshift.io
   resourceNames:
   - cluster
@@ -327,9 +312,14 @@ rules:
   - ""
   resources:
   - configmaps
+  verbs:
+  - delete
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
   - events
   - pods
-  - pods/exec
   - secrets
   verbs:
   - create
@@ -341,31 +331,16 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - configmaps
-  - pods
-  - pods/exec
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-- apiGroups:
-  - ""
-  resources:
   - endpoints
   - pods
-  - pods/exec
   - services
   verbs:
-  - create
   - get
   - list
   - watch
 - apiGroups:
   - ""
   resources:
-  - pods
-  - pods/exec
   - services
   - services/finalizers
   verbs:

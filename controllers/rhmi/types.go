@@ -14,6 +14,7 @@ type Stage struct {
 var (
 	allManagedApiStages = &Type{
 		[]Stage{
+			/*
 			{
 				Name: integreatlyv1alpha1.BootstrapStage,
 			},
@@ -49,6 +50,7 @@ var (
 					integreatlyv1alpha1.ProductGrafana:   {Name: integreatlyv1alpha1.ProductGrafana},
 				},
 			},
+*/
 		},
 		[]Stage{
 			{
@@ -78,6 +80,7 @@ var (
 	}
 	allManagedStages = &Type{
 		[]Stage{
+/*
 			{
 				Name: integreatlyv1alpha1.BootstrapStage,
 			},
@@ -124,6 +127,7 @@ var (
 					integreatlyv1alpha1.ProductSolutionExplorer: {Name: integreatlyv1alpha1.ProductSolutionExplorer},
 				},
 			},
+*/
 		},
 		[]Stage{
 			{

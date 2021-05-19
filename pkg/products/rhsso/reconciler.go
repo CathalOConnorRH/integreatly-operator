@@ -8,11 +8,10 @@ import (
 	"github.com/pkg/errors"
 
 	"github.com/integr8ly/integreatly-operator/pkg/products/rhssocommon"
-	l "github.com/integr8ly/integreatly-operator/pkg/resources/logger"
-	"github.com/integr8ly/integreatly-operator/version"
-
 	"github.com/integr8ly/integreatly-operator/pkg/resources/events"
+	l "github.com/integr8ly/integreatly-operator/pkg/resources/logger"
 	userHelper "github.com/integr8ly/integreatly-operator/pkg/resources/user"
+	"github.com/integr8ly/integreatly-operator/version"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -230,6 +229,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, installation *integreatlyv1a
 
 func (r *Reconciler) reconcileComponents(ctx context.Context, installation *integreatlyv1alpha1.RHMI, serverClient k8sclient.Client) (integreatlyv1alpha1.StatusPhase, error) {
 	r.Log.Info("Reconciling Keycloak components")
+
+	/*host := ""
+	route := &routev1.Route{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "alertmanager-route",
+			Namespace: "redhat-rhoam-middleware-monitoring-operator",
+		},
+	}
+	key := k8sclient.ObjectKey{
+		Name:      route.GetName(),
+		Namespace: route.GetNamespace(),
+	}
+
+	err := serverClient.Get(context.TODO(), key, route)
+	if err != nil {
+		r.Log.Error("failed to get route: %w", err)
+	}
+
+	host = "https://" + route.Spec.Host
+	r.Log.Info("Host : " + host)
+*/
+
 	kc := &keycloak.Keycloak{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      keycloakName,
