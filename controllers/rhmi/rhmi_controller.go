@@ -17,9 +17,12 @@ limitations under the License.
 package controllers
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
-	v1 "github.com/openshift/api/route/v1"
+	routev1 "github.com/openshift/api/route/v1"
+	appsv1Client "github.com/openshift/client-go/apps/clientset/versioned/typed/apps/v1"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -82,6 +85,7 @@ const (
 	priorityClassNameEnvName         = "PRIORITY_CLASS_NAME"
 	managedServicePriorityClassName  = "rhoam-pod-priority"
 	alertManagerRouteName            = "alertmanager-route"
+	routeRequestUrl                  = "/apis/route.openshift.io/v1"
 )
 
 var (
@@ -91,6 +95,27 @@ var (
 		"KeycloakInstanceNotAvailable",
 	}
 )
+
+type Silences []struct {
+	Silence Silence
+}
+
+type Silence struct {
+	ID     string `json:"id"`
+	Status struct {
+		State string `json:"state"`
+	} `json:"status"`
+	UpdatedAt time.Time `json:"updatedAt"`
+	Comment   string    `json:"comment"`
+	CreatedBy string    `json:"createdBy"`
+	EndsAt    time.Time `json:"endsAt"`
+	Matchers  []struct {
+		IsRegex bool   `json:"isRegex"`
+		Name    string `json:"name"`
+		Value   string `json:"value"`
+	} `json:"matchers"`
+	StartsAt time.Time `json:"startsAt"`
+}
 
 // RHMIReconciler reconciles a RHMI object
 type RHMIReconciler struct {
@@ -123,7 +148,6 @@ func New(mgr ctrl.Manager) *RHMIReconciler {
 }
 
 // ClusterRole permissions
-// +kubebuilder:rbac:groups="",resources=routes,verbs=""
 
 // +kubebuilder:rbac:groups=integreatly.org;applicationmonitoring.integreatly.org,resources=*,verbs=*
 // +kubebuilder:rbac:groups=integreatly.org,resources=rhmis,verbs=get;list;watch;create;update;patch;delete
@@ -140,12 +164,15 @@ func New(mgr ctrl.Manager) *RHMIReconciler {
 // +kubebuilder:rbac:groups=apps,resources=deployments;statefulsets,verbs=list;get;watch
 // +kubebuilder:rbac:groups=apps.openshift.io,resources=deploymentconfigs,verbs=list;get;watch
 
+// We need to get console route for solution explorer
+// +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get
+
 // Reconciling Fuse templates and image streams
 // +kubebuilder:rbac:groups=template.openshift.io,resources=templates,verbs=get;create;update;delete
 // +kubebuilder:rbac:groups=image.openshift.io,resources=imagestreams,verbs=get;create;update;delete
 
 // Registry pull secret needs to be read to be then copied into some RHMI namespaces
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get,resourceNames=pull-secret
+// +kubebuilder:rbac:groups="",resources=secrets;,verbs=get,resourceNames=pull-secret
 
 // We need to read this Secret from openshift-monitoring namespace in order to setup our monitoring stack
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get,resourceNames=grafana-datasources
@@ -435,105 +462,104 @@ func (r *RHMIReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error) {
 	}
 	metrics.SetRHMIStatus(installation)
 
-	log.Info("Creating Silence for Keycloak KeycloakInstanceNotAvailable alert")
-	err = r.createSilence(installation, context.TODO(), r.Client)
-
-	if err != nil {
-		log.Error("Error creating silence", err)
-	}
-
 	err = r.updateStatusAndObject(originalInstallation, installation)
 	return retryRequeue, err
 }
 
-func (r *RHMIReconciler) createSilence(installation *rhmiv1alpha1.RHMI, ctx context.Context, client k8sclient.Client) error {
+func (r *RHMIReconciler) createSilence(installation *rhmiv1alpha1.RHMI, ctx context.Context, rc *rest.Config) error {
 
-	endpoint := "/api/v1/silences"
-
-	//openshiftMonitoringNamespace := "openshift-monitoring"
-	//openshiftAlertManagerRoute := "alertmanager-main"
-
-	openshiftMonitoringNamespace := "redhat-rhoam-middleware-monitoring-operator"
-	openshiftAlertManagerRoute := "alertmanager-route"
-
-	//integreatlyMonitoringNamespace := installation.Spec.NamespacePrefix + "middleware-monitoring-operator"
-	//integreatlyAlertManagerRoute := "alertmanager-route"
-	//integreatlyPodName := "alertmanager-application-monitoring-0"
-
-	for _, alert := range alertsToSilence {
-		exists, err := r.silenceExists(installation, openshiftMonitoringNamespace, openshiftAlertManagerRoute, endpoint, log, alert, ctx, client)
-		if err != nil {
-			log.Error("Error checking for silence", err)
-		}
-		if !exists {
-			silenceAlert(openshiftMonitoringNamespace, openshiftAlertManagerRoute, endpoint, log, alert, ctx, client)
-		}
-
-		/*exists, err = silenceExists(integreatlyMonitoringNamespace, integreatlyPodName, host, endpoint, log, containerName, alert)
-		if err != nil {
-			log.Error("Error checking for silence", err)
-		}
-		if !exists {
-			silenceAlert(integreatlyMonitoringNamespace, integreatlyPodName, host, endpoint, log, containerName, alert)
-		}
-
-		*/
+	var alertingNamespaces = map[string]string{
+		"openshift-monitoring": "alertmanager-main",
+		installation.Spec.NamespacePrefix + "middleware-monitoring-operator": "alertmanager-route",
 	}
 
+	for namespace, route := range alertingNamespaces {
+		for _, alert := range alertsToSilence {
+			exists, err := r.silenceExists(installation, namespace, route, log, rc, alert)
+			if err != nil {
+				log.Error("Error checking for silence", err)
+			}
+			if !exists {
+				r.silenceAlert(installation, namespace, route, log, rc, alert)
+			}
+		}
+	}
 	return nil
 }
 
-func silenceAlert(namespace string, route string, endpoint string, log l.Logger, alertName string, ctx context.Context, client k8sclient.Client) {
+func (r *RHMIReconciler) silenceAlert(installation *rhmiv1alpha1.RHMI, namespace string, route string, log l.Logger, rc *rest.Config, alertName string) error {
 
-	/*url, err := getURLFromRoute(route,namespace, ctx, client)
-	if err != nil {
-		//return false, err
-		log.Error("Error get", err)
-	}
-
-
-	*/
-
-	/*command := "curl -H 'Content-Type: application/json' -X POST -d "
+	endpoint := "/api/v1/silences"
 	startsAt := time.Now().Format(time.RFC3339)
 	endsAt := time.Now().Add(time.Hour * 1).Format(time.RFC3339)
-	silence := "'{\"endsAt\": \"" + endsAt + "\"," +
-		"\"startsAt\": \"" + startsAt + "\"," +
-		"\"matchers\": " +
-		"[{\"isRegex\": false,\"name\": \"alertname\",\"value\": \"" + alertName + "\"}]" +
-		",\"Comment\": \"Silence alert due to uninstall\"," +
-		"\"createdBy\": \"Integreatly Operator\"}' "
 
-	stdout, stderr, err := resources.ExecuteRemoteCommand(namespace, podName, command+silence+host+endpoint, log, containerName)
+	var silence = []byte(`{` +
+		`"endsAt": "` + endsAt + `",` +
+		`"startsAt": "` + startsAt + `",` +
+		`"matchers":[{"isRegex": false, "name": "alertname","value": "` + alertName + `"}],` +
+		`"Comment":"Silence alert due to uninstall",` +
+		`"createdBy":"Integreatly Operator"}`)
+
+	url, err := r.getURLFromRoute(route, namespace, rc)
 	if err != nil {
-		log.Error("Failed to curl alerts", err)
-	} else if stderr != "" {
-		err := errors.New(stderr)
-		log.Error("Error attempting curl alerts", err)
-	} else {
-		log.Infof("Alerts result", l.Fields{"stdout": stdout})
-	}*/
+		return fmt.Errorf("error getting route : %w", err)
+
+	}
+	url = url + endpoint
+	serviceAccount := r.getServiceAccount(installation)
+
+	token, err := r.getBearerToken(installation, serviceAccount)
+	if err != nil {
+		return fmt.Errorf("error getting bearer token : %w", err)
+	}
+
+	var bearer = "Bearer " + token
+
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(silence))
+	req.Header.Add("Authorization", bearer)
+	req.Header.Add("Content-Type", "application/json")
+
+	client := &http.Client{}
+	client.Timeout = time.Second * 10
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error on response : %w", err)
+	}
+	defer resp.Body.Close()
+
+	_, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("unable to read body : %w", err)
+	}
+	return nil
 }
 
-func (r *RHMIReconciler) silenceExists(installation *rhmiv1alpha1.RHMI, namespace string, route string, endpoint string, log l.Logger, alertName string, ctx context.Context, serverClient k8sclient.Client) (bool, error) {
+func (r *RHMIReconciler) silenceExists(installation *rhmiv1alpha1.RHMI, namespace string, route string, log l.Logger, rc *rest.Config, alert string) (bool, error) {
 	silenceExists := false
+	endpoint := "/api/v2/silences"
 
-	url, err := r.getURLFromRoute(route, namespace, ctx, serverClient)
+	url, err := r.getURLFromRoute(route, namespace, rc)
+	if err != nil {
+		return false, err
+	}
+	url = url + endpoint
+
+	serviceAccount := r.getServiceAccount(installation)
+
+	token, err := r.getBearerToken(installation, serviceAccount)
 	if err != nil {
 		return false, err
 	}
 
-	token, err := getBearerToken(installation, ctx, serverClient)
-	if err != nil {
-		return false, err
-	}
 	var bearer = "Bearer " + token
 
 	req, err := http.NewRequest("GET", url, nil)
-	// add authorization header to the req
 	req.Header.Add("Authorization", bearer)
 
 	client := &http.Client{}
+	client.Timeout = time.Second * 10
+
 	resp, err := client.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("error on response : %w", err)
@@ -542,39 +568,45 @@ func (r *RHMIReconciler) silenceExists(installation *rhmiv1alpha1.RHMI, namespac
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		log.Error("Unable to read body", err)
+		return false, fmt.Errorf("unable to read body : %w", err)
 	}
-	log.Info(string(body))
-	/*command := "curl -s "
 
-	stdout, stderr, err := resources.ExecuteRemoteCommand(namespace, podName, command+host+endpoint, log, containerName)
+	var promApiCallOutput []Silence
+	err = json.Unmarshal([]byte(body), &promApiCallOutput)
 	if err != nil {
-		log.Error("Failed to curl alerts", err)
-		return silenceExists, err
-	} else if stderr != "" {
-		err := errors.New(stderr)
-		log.Error("Error attempting curl alerts", err)
-		return silenceExists, err
+		return false, fmt.Errorf("failed to unmarshal json: %w", err)
 	}
 
-	if strings.Contains(stdout, alertName) {
-		silenceExists = true
-	}*/
+	for _, silence := range promApiCallOutput {
+		if silence.Status.State == "active" && silence.Matchers[0].Name == "alertname" && silence.Matchers[0].Value == alert {
+			silenceExists = true
+		}
+	}
+
 	return silenceExists, nil
 }
 
-func getBearerToken(installation *rhmiv1alpha1.RHMI, ctx context.Context, client k8sclient.Client) (string, error) {
-	serviceAccount := &corev1.ServiceAccount{}
-	err := client.Get(ctx, types.NamespacedName{Name: "rhmi-operator", Namespace: installation.GetNamespace()}, serviceAccount)
-	if err != nil {
-		return "", fmt.Errorf("failed to get service account: %w", err)
+func (r *RHMIReconciler) getServiceAccount(installation *rhmiv1alpha1.RHMI) *corev1.ServiceAccount {
+
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rhmi-operator",
+			Namespace: installation.GetNamespace(),
+		},
 	}
 
-	secretName := serviceAccount.Secrets
+	r.Client.Get(context.TODO(), types.NamespacedName{Name: serviceAccount.Name, Namespace: serviceAccount.Namespace}, serviceAccount)
+
+	return serviceAccount
+}
+
+func (r *RHMIReconciler) getBearerToken(installation *rhmiv1alpha1.RHMI, serviceAccount *corev1.ServiceAccount) (string, error) {
+
 	tokenSecret := ""
-	for _, secret := range secretName {
-		if strings.Contains(secret.String(), "token") {
-			tokenSecret = secret.String()
+
+	for _, secret := range serviceAccount.Secrets {
+		if strings.Contains(secret.Name, "token") {
+			tokenSecret = secret.Name
 		}
 	}
 
@@ -585,25 +617,40 @@ func getBearerToken(installation *rhmiv1alpha1.RHMI, ctx context.Context, client
 		},
 	}
 
-	err = client.Get(ctx, types.NamespacedName{Name: tokenSecret, Namespace: installation.Namespace}, secret)
-	if err != nil {
-		return "", fmt.Errorf("failed to get secret: %w", err)
-	}
+	r.Client.Get(context.TODO(), types.NamespacedName{Name: secret.Name, Namespace: secret.Namespace}, secret)
+
 	return string(secret.Data["token"]), nil
 }
 
-func (r *RHMIReconciler) getURLFromRoute(routeName string, namespace string, ctx context.Context, client k8sclient.Client) (string, error) {
-	host := ""
-	route := &v1.Route{}
-
-	err := r.Get(context.TODO(), types.NamespacedName{Name: "test", Namespace: "redhat-rhoam-middleware-monitoring-operator"}, route)
+func (r *RHMIReconciler) getURLFromRoute(routeName string, namespace string, rc *rest.Config) (string, error) {
+	client, err := appsv1Client.NewForConfig(rc)
 	if err != nil {
-		return "", fmt.Errorf("failed to get route: %w", err)
+		return "", fmt.Errorf("unable to create rest client %s", err)
+	}
+	client.RESTClient().(*rest.RESTClient).Client.Timeout = 10 * time.Second
+
+	host := ""
+	route := &routev1.Route{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      routeName,
+			Namespace: namespace,
+		},
 	}
 
+	request := client.RESTClient().Get().Resource("routes").Name(route.Name).Namespace(route.Namespace).RequestURI(routeRequestUrl).Do(context.TODO())
+	requestBody, err := request.Raw()
+
+	if err != nil {
+		return "", fmt.Errorf("unable to find route %s Route probably already removed", err)
+	}
+	err = json.Unmarshal(requestBody, route)
+	if err != nil {
+		return "", fmt.Errorf("unable to unmarshal response body %s", err)
+	}
 	host = "https://" + route.Spec.Host
 	return host, nil
 }
+
 func (r *RHMIReconciler) reconcilePodDistribution(installation *rhmiv1alpha1.RHMI) {
 
 	serverClient, err := k8sclient.New(r.restConfig, k8sclient.Options{})
@@ -680,7 +727,7 @@ func (r *RHMIReconciler) handleUninstall(installation *rhmiv1alpha1.RHMI, instal
 	}
 
 	log.Info("Creating Silence for Keycloak KeycloakInstanceNotAvailable alert")
-	err = r.createSilence(installation, context.TODO(), r.Client)
+	err = r.createSilence(installation, context.TODO(), r.restConfig)
 
 	if err != nil {
 		log.Error("Error creating silence", err)

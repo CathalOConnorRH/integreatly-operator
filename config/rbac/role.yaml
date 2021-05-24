@@ -29,12 +29,6 @@ rules:
   - list
 - apiGroups:
   - ""
-  resources:
-  - routes
-  verbs:
-  - ""
-- apiGroups:
-  - ""
   resourceNames:
   - grafana-datasources
   resources:
@@ -243,6 +237,12 @@ rules:
   - get
   - list
   - update
+- apiGroups:
+  - route.openshift.io
+  resources:
+  - routes
+  verbs:
+  - get
 - apiGroups:
   - samples.operator.openshift.io
   resourceNames:
