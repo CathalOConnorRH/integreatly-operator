@@ -81,9 +81,9 @@ func (r *Reconciler) newAlertsReconciler(installType string) resources.AlertReco
 						Alert: "CodeReadyPodCount",
 						Annotations: map[string]string{
 							"sop_url": resources.SopUrlAlertsAndTroubleshooting,
-							"message": "Pod count for namespace {{  $labels.namespace  }} is {{  $value  }}. Expected at least 2 pods.",
+							"message": "Pod count for namespace {{  $labels.namespace  }} is {{  $value  }}. Expected at least 3 pods.",
 						},
-						Expr:   intstr.FromString(fmt.Sprintf("(1-absent(kube_pod_status_ready{condition='true', namespace='%[1]v'})) or sum(kube_pod_status_ready{condition='true', namespace='%[1]v'}) < 2", r.Config.GetNamespace())),
+						Expr:   intstr.FromString(fmt.Sprintf("sum(kube_pod_status_ready{condition='true', namespace='%[1]v'}) < 3 or sum(kube_pod_status_ready{condition='false', namespace='%[1]v'}) != 0", r.Config.GetNamespace())),
 						For:    "5m",
 						Labels: map[string]string{"severity": "critical", "product": installationName},
 					},
